@@ -37,9 +37,7 @@ import math
 import struct
 
 from micropython import const
-from adafruit_bus_device.i2c_device import I2CDevice
-from adafruit_register import i2c_bit
-from adafruit_register import i2c_bits
+from machine import I2C
 
 __version__ = "0.0.0-auto.0"
 __repo__ = "https://github.com/adafruit/Adafruit_CircuitPython_CCS811.git"
@@ -53,18 +51,18 @@ _THRESHOLDS = const(0x10)
 
 _BASELINE = const(0x11)
 
-# _HW_ID = 0x20
-# _HW_VERSION = 0x21
-# _FW_BOOT_VERSION = 0x23
-# _FW_APP_VERSION = 0x24
-# _ERROR_ID = 0xE0
+_HW_ID = 0x20
+_HW_VERSION = 0x21
+_FW_BOOT_VERSION = 0x23
+_FW_APP_VERSION = 0x24
+_ERROR_ID = 0xE0
 
 _SW_RESET = const(0xFF)
 
-# _BOOTLOADER_APP_ERASE = 0xF1
-# _BOOTLOADER_APP_DATA = 0xF2
-# _BOOTLOADER_APP_VERIFY = 0xF3
-# _BOOTLOADER_APP_START = 0xF4
+_BOOTLOADER_APP_ERASE = 0xF1
+_BOOTLOADER_APP_DATA = 0xF2
+_BOOTLOADER_APP_VERIFY = 0xF3
+_BOOTLOADER_APP_START = 0xF4
 
 DRIVE_MODE_IDLE = const(0x00)
 DRIVE_MODE_1SEC = const(0x01)
@@ -84,35 +82,36 @@ class CCS811:
     """
 
     # set up the registers
-    error = i2c_bit.ROBit(0x00, 0)
-    """True when an error has occured."""
-    data_ready = i2c_bit.ROBit(0x00, 3)
-    """True when new data has been read."""
-    app_valid = i2c_bit.ROBit(0x00, 4)
-    fw_mode = i2c_bit.ROBit(0x00, 7)
+    #error = i2c_bit.ROBit(0x00, 0)
+    #"""True when an error has occured."""
+    #data_ready = i2c_bit.ROBit(0x00, 3)
+    #"""True when new data has been read."""
+    #app_valid = i2c_bit.ROBit(0x00, 4)
+    #fw_mode = i2c_bit.ROBit(0x00, 7)
 
-    hw_id = i2c_bits.ROBits(8, 0x20, 0)
+    #hw_id = i2c_bits.ROBits(8, 0x20, 0)
 
-    int_thresh = i2c_bit.RWBit(0x01, 2)
-    interrupt_enabled = i2c_bit.RWBit(0x01, 3)
-    drive_mode = i2c_bits.RWBits(3, 0x01, 4)
+    #int_thresh = i2c_bit.RWBit(0x01, 2)
+    #interrupt_enabled = i2c_bit.RWBit(0x01, 3)
+    #drive_mode = i2c_bits.RWBits(3, 0x01, 4)
 
     temp_offset = 0.0
     """Temperature offset."""
 
     def __init__(self, i2c_bus, address=0x5A):
-        self.i2c_device = I2CDevice(i2c_bus, address)
+        self.i2c = I2C(i2c_bus, I2C_MASTER)
+        self.address = address
 
         # check that the HW id is correct
-        if self.hw_id != _HW_ID_CODE:
+        if self.i2c.readfrom_mem(self.address, 0x20, 1)[0] != _HW_ID_CODE:
             raise RuntimeError(
                 "Device ID returned is not correct! Please check your wiring."
             )
+
         # try to start the app
         buf = bytearray(1)
         buf[0] = 0xF4
-        with self.i2c_device as i2c:
-            i2c.write(buf, end=1)
+        i2c.writeto(self.address, buf, end=1)
         time.sleep(0.1)
 
         # make sure there are no errors and we have entered application mode
@@ -127,29 +126,43 @@ class CCS811:
                 "be a problem with the firmware on your sensor."
             )
 
-        self.interrupt_enabled = False
-
-        # default to read every second
-        self.drive_mode = DRIVE_MODE_1SEC
+        # aquí viene la parte en la que hago apaños cuestionables
+        # para no tener que portar otra librería. Espero que funcione
+        ib = self.i2c.readfrom_mem(self.address, 0x01, 1)
+        ib[0] = ib[0] & ~(1<<3)
+        ib[0] = ib[0] & ~(0x01<<5)
+        self.i2c.writeto_mem(self.address, 0x01, ib)
 
         self._eco2 = None  # pylint: disable=invalid-name
         self._tvoc = None  # pylint: disable=invalid-name
+
+    @property
+    def error(self):
+        return self.i2c.readfrom_mem(self.address, 0x00, 1)[0] & 1
+
+    @property
+    def fw_mode(self):
+        return self.i2c.readfrom_mem(self.address, 0x00, 1)[0] & 8
+
+    @property
+    def data_ready(self):
+        return self.i2c.readfrom_mem(self.address, 0x00, 1)[0] & 4
 
     @property
     def error_code(self):
         """Error code"""
         buf = bytearray(2)
         buf[0] = 0xE0
-        with self.i2c_device as i2c:
-            i2c.write_then_readinto(buf, buf, out_end=1, in_start=1)
+        self.i2c.writeto(self.address, buf[0])
+        self.i2c.readfrom_into(self.address, buf[1])
         return buf[1]
 
     def _update_data(self):
         if self.data_ready:
             buf = bytearray(9)
             buf[0] = _ALG_RESULT_DATA
-            with self.i2c_device as i2c:
-                i2c.write_then_readinto(buf, buf, out_end=1, in_start=1)
+            self.i2c.writeto(self.address, buf[0])
+            self.i2c.readfrom_into(self.address, buf[1:])
 
             self._eco2 = (buf[1] << 8) | (buf[2])
             self._tvoc = (buf[3] << 8) | (buf[4])
@@ -167,8 +180,8 @@ class CCS811:
         """
         buf = bytearray(3)
         buf[0] = _BASELINE
-        with self.i2c_device as i2c:
-            i2c.write_then_readinto(buf, buf, out_end=1, in_start=1)
+        self.i2c.writeto(self.address, buf[0])
+        self.i2c.readfrom_into(self.address, buf[1:])
         return struct.unpack("<H", buf[1:])[0]
 
     @baseline.setter
@@ -180,8 +193,7 @@ class CCS811:
         buf = bytearray(3)
         buf[0] = _BASELINE
         struct.pack_into("<H", buf, 1, baseline_int)
-        with self.i2c_device as i2c:
-            i2c.write(buf)
+        self.i2c.writeto(self.address, buf)
 
     @property
     def tvoc(self):  # pylint: disable=invalid-name
@@ -195,6 +207,7 @@ class CCS811:
         self._update_data()
         return self._eco2
 
+    # al estar obsoleto, no he cambiado esta función
     @property
     def temperature(self):
         """
@@ -240,8 +253,7 @@ class CCS811:
         buf[0] = _ENV_DATA
         struct.pack_into(">HH", buf, 1, humidity, temperature)
 
-        with self.i2c_device as i2c:
-            i2c.write(buf)
+        self.i2c.writeto(self.address, buf)
 
     def set_interrupt_thresholds(self, low_med, med_high, hysteresis):
         """Set the thresholds used for triggering the interrupt based on eCO2.
@@ -261,12 +273,11 @@ class CCS811:
                 hysteresis,
             ]
         )
-        with self.i2c_device as i2c:
-            i2c.write(buf)
+
+        self.i2c.writeto(self.address, buf)
 
     def reset(self):
         """Initiate a software reset."""
         # reset sequence from the datasheet
         seq = bytearray([_SW_RESET, 0x11, 0xE5, 0x72, 0x8A])
-        with self.i2c_device as i2c:
-            i2c.write(seq)
+        self.i2c.writeto(self.address, seq)
